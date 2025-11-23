@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PremiumModal } from "@/components/PremiumModal";
+import { supabase } from "@/lib/supabase";
 import { 
   Calculator, 
   Target, 
@@ -27,10 +28,12 @@ import {
   Bell,
   BarChart3,
   Sparkles,
-  Check
+  Check,
+  Loader2
 } from "lucide-react";
 
 interface UserProfile {
+  id?: string;
   name: string;
   age: string;
   weight: string;
@@ -69,13 +72,95 @@ export default function NutriMatch() {
     restrictions: ''
   });
   const [mealPlan, setMealPlan] = useState<MealPlan | null>(null);
+  const [weeklyRoutine, setWeeklyRoutine] = useState<any>(null);
+  const [shoppingList, setShoppingList] = useState<any>(null);
+  const [reminders, setReminders] = useState<any>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingWeekly, setIsGeneratingWeekly] = useState(false);
+  const [isGeneratingShopping, setIsGeneratingShopping] = useState(false);
+  const [isGeneratingReminders, setIsGeneratingReminders] = useState(false);
   const [chatMessages, setChatMessages] = useState<Array<{role: 'user' | 'ai', message: string}>>([]);
   const [chatInput, setChatInput] = useState('');
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [isPremium, setIsPremium] = useState(false);
   const [showPremiumModal, setShowPremiumModal] = useState(false);
   const [plansGeneratedThisMonth, setPlansGeneratedThisMonth] = useState(0);
   const [aiConsultationsThisMonth, setAiConsultationsThisMonth] = useState(0);
+
+  // Carregar perfil do Supabase ao iniciar
+  useEffect(() => {
+    loadProfile();
+  }, []);
+
+  const loadProfile = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .limit(1)
+        .single();
+
+      if (data && !error) {
+        setProfile({
+          id: data.id,
+          name: data.name,
+          age: data.age?.toString() || '',
+          weight: data.weight?.toString() || '',
+          height: data.height?.toString() || '',
+          gender: data.gender || '',
+          activity: data.activity_level || '',
+          goal: data.goal || '',
+          budget: data.budget || '',
+          restrictions: data.restrictions || ''
+        });
+        setIsPremium(data.is_premium);
+        setPlansGeneratedThisMonth(data.plans_generated_this_month);
+        setAiConsultationsThisMonth(data.ai_consultations_this_month);
+        setStep('dashboard');
+      }
+    } catch (error) {
+      console.error('Erro ao carregar perfil:', error);
+    }
+  };
+
+  const saveProfile = async () => {
+    try {
+      const profileData = {
+        name: profile.name,
+        age: parseInt(profile.age),
+        weight: parseFloat(profile.weight),
+        height: parseFloat(profile.height),
+        gender: profile.gender,
+        activity_level: profile.activity,
+        goal: profile.goal,
+        budget: profile.budget,
+        restrictions: profile.restrictions,
+        is_premium: isPremium,
+        plans_generated_this_month: plansGeneratedThisMonth,
+        ai_consultations_this_month: aiConsultationsThisMonth,
+        updated_at: new Date().toISOString()
+      };
+
+      if (profile.id) {
+        await supabase
+          .from('profiles')
+          .update(profileData)
+          .eq('id', profile.id);
+      } else {
+        const { data, error } = await supabase
+          .from('profiles')
+          .insert([profileData])
+          .select()
+          .single();
+
+        if (data && !error) {
+          setProfile({ ...profile, id: data.id });
+        }
+      }
+    } catch (error) {
+      console.error('Erro ao salvar perfil:', error);
+    }
+  };
 
   const calculateIMC = () => {
     if (!profile.weight || !profile.height) return 0;
@@ -192,11 +277,133 @@ export default function NutriMatch() {
     };
     
     setMealPlan(plan);
-    setPlansGeneratedThisMonth(plansGeneratedThisMonth + 1);
+    
+    // Salvar no Supabase
+    try {
+      await supabase.from('meal_plans').insert([{
+        profile_id: profile.id,
+        calories: plan.calories,
+        total_cost: plan.totalCost,
+        budget_type: plan.budgetType,
+        meals: plan.meals
+      }]);
+    } catch (error) {
+      console.error('Erro ao salvar plano:', error);
+    }
+    
+    const newCount = plansGeneratedThisMonth + 1;
+    setPlansGeneratedThisMonth(newCount);
+    await saveProfile();
     setIsGenerating(false);
   };
 
-  const sendMessage = () => {
+  const generateWeeklyRoutine = async () => {
+    if (!isPremium) {
+      setShowPremiumModal(true);
+      return;
+    }
+
+    setIsGeneratingWeekly(true);
+    try {
+      const response = await fetch('/api/ai/meal-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setWeeklyRoutine(result.data);
+        
+        // Salvar no Supabase
+        await supabase.from('weekly_routines').insert([{
+          profile_id: profile.id,
+          week_start: new Date().toISOString().split('T')[0],
+          routine: result.data
+        }]);
+      }
+    } catch (error) {
+      console.error('Erro ao gerar rotina semanal:', error);
+    }
+    setIsGeneratingWeekly(false);
+  };
+
+  const generateShoppingList = async () => {
+    if (!isPremium) {
+      setShowPremiumModal(true);
+      return;
+    }
+
+    if (!weeklyRoutine) {
+      alert('Gere primeiro uma rotina semanal!');
+      return;
+    }
+
+    setIsGeneratingShopping(true);
+    try {
+      const response = await fetch('/api/ai/shopping-list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          weeklyPlan: weeklyRoutine.weeklyPlan,
+          budget: profile.budget 
+        })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setShoppingList(result.data);
+        
+        // Salvar no Supabase
+        await supabase.from('shopping_lists').insert([{
+          profile_id: profile.id,
+          items: result.data,
+          total_cost: result.data.totalCost
+        }]);
+      }
+    } catch (error) {
+      console.error('Erro ao gerar lista de compras:', error);
+    }
+    setIsGeneratingShopping(false);
+  };
+
+  const generateReminders = async () => {
+    if (!isPremium) {
+      setShowPremiumModal(true);
+      return;
+    }
+
+    setIsGeneratingReminders(true);
+    try {
+      const response = await fetch('/api/ai/reminders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile, mealPlan })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setReminders(result.data);
+        
+        // Salvar no Supabase
+        const remindersToSave = result.data.reminders.map((r: any) => ({
+          profile_id: profile.id,
+          type: r.type,
+          message: r.message,
+          time: r.time,
+          days_of_week: r.daysOfWeek,
+          is_active: true
+        }));
+        
+        await supabase.from('reminders').insert(remindersToSave);
+      }
+    } catch (error) {
+      console.error('Erro ao gerar lembretes:', error);
+    }
+    setIsGeneratingReminders(false);
+  };
+
+  const sendMessage = async () => {
     if (!chatInput.trim()) return;
     
     if (!canUseAIChat()) {
@@ -204,30 +411,58 @@ export default function NutriMatch() {
       return;
     }
     
-    const responses = [
-      `Perfeito! Com base no seu perfil (${profile.goal === 'lose' ? 'emagrecimento' : profile.goal === 'gain' ? 'ganho de massa' : 'manutenção'}), recomendo focar em ${profile.goal === 'lose' ? 'déficit calórico controlado com proteínas magras' : profile.goal === 'gain' ? 'superávit calórico com foco em proteínas e carboidratos complexos' : 'equilíbrio nutricional'}. Posso ajustar seu plano conforme sua preferência de orçamento!`,
-      `Ótima pergunta! Para o seu objetivo, sugiro manter uma alimentação balanceada com ${profile.budget === 'low' ? 'opções econômicas como ovos, frango e legumes da estação' : profile.budget === 'medium' ? 'proteínas de qualidade e carboidratos complexos' : 'alimentos premium e orgânicos'}. Isso vai te ajudar a alcançar suas metas de forma saudável!`,
-      `Entendo sua dúvida! Com ${Math.round(calculateTMB())} kcal de TMB e seu nível de atividade, você precisa de aproximadamente ${Math.round(calculateTMB() * 1.5)} kcal/dia. Vou te ajudar a distribuir isso nas refeições de forma inteligente!`,
-      `Excelente! Para substituições mais econômicas, você pode trocar: Salmão → Sardinha ou Atum em lata | Quinoa → Arroz integral | Castanhas → Amendoim. Todas mantêm bom valor nutricional!`,
-      `Dica importante: ${profile.goal === 'lose' ? 'Para emagrecer, mantenha déficit de 300-500 kcal/dia' : profile.goal === 'gain' ? 'Para ganhar massa, adicione 300-500 kcal/dia' : 'Para manter, equilibre calorias consumidas e gastas'}. Hidratação também é fundamental - beba pelo menos 2L de água por dia!`
-    ];
-    
-    const randomResponse = responses[Math.floor(Math.random() * responses.length)];
+    const userMessage = chatInput;
+    setChatInput('');
     
     const newMessages = [
       ...chatMessages,
-      { role: 'user' as const, message: chatInput },
-      { role: 'ai' as const, message: randomResponse }
+      { role: 'user' as const, message: userMessage }
     ];
-    
     setChatMessages(newMessages);
-    setAiConsultationsThisMonth(aiConsultationsThisMonth + 1);
-    setChatInput('');
+    
+    setIsSendingMessage(true);
+    try {
+      const response = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: userMessage,
+          profile,
+          chatHistory: chatMessages
+        })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setChatMessages([
+          ...newMessages,
+          { role: 'ai' as const, message: result.message }
+        ]);
+        
+        // Salvar no Supabase
+        await supabase.from('chat_history').insert([
+          { profile_id: profile.id, role: 'user', message: userMessage },
+          { profile_id: profile.id, role: 'assistant', message: result.message }
+        ]);
+        
+        const newCount = aiConsultationsThisMonth + 1;
+        setAiConsultationsThisMonth(newCount);
+        await saveProfile();
+      }
+    } catch (error) {
+      console.error('Erro no chat:', error);
+      setChatMessages([
+        ...newMessages,
+        { role: 'ai' as const, message: 'Desculpe, ocorreu um erro. Tente novamente.' }
+      ]);
+    }
+    setIsSendingMessage(false);
   };
 
   const handleUpgrade = () => {
     setIsPremium(true);
     setShowPremiumModal(false);
+    saveProfile();
     alert('🎉 Parabéns! Você agora é Premium! Em produção, isso seria integrado com Stripe.');
   };
 
@@ -463,7 +698,10 @@ export default function NutriMatch() {
               </div>
 
               <Button 
-                onClick={() => setStep('dashboard')} 
+                onClick={async () => {
+                  await saveProfile();
+                  setStep('dashboard');
+                }} 
                 className="w-full bg-gradient-to-r from-[#8FD694] to-[#FF9E4A] hover:opacity-90 text-white font-bold py-6 text-lg"
                 disabled={!profile.name || !profile.weight || !profile.height || !profile.goal || !profile.budget}
               >
@@ -625,7 +863,7 @@ export default function NutriMatch() {
                   >
                     {isGenerating ? (
                       <>
-                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
+                        <Loader2 className="w-5 h-5 mr-3 animate-spin" />
                         Analisando seu perfil e criando plano ideal...
                       </>
                     ) : (
@@ -650,12 +888,27 @@ export default function NutriMatch() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Calendar className="w-5 h-5 text-[#8FD694]" />
-                    Rotina Semanal
+                    Rotina Semanal com IA
                   </CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <p className="text-gray-600">Planeje suas refeições para a semana toda com base no seu orçamento</p>
-                  {!isPremium && (
+                <CardContent className="space-y-3">
+                  <p className="text-gray-600">Planeje suas refeições para a semana toda com IA da OpenAI</p>
+                  {isPremium ? (
+                    <Button 
+                      onClick={generateWeeklyRoutine}
+                      disabled={isGeneratingWeekly}
+                      className="w-full bg-[#8FD694] hover:bg-[#8FD694]/90"
+                    >
+                      {isGeneratingWeekly ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Gerando...
+                        </>
+                      ) : (
+                        'Gerar Rotina Semanal'
+                      )}
+                    </Button>
+                  ) : (
                     <Badge className="mt-3 bg-amber-100 text-amber-800 border-amber-300">
                       <Lock className="w-3 h-3 mr-1" />
                       Premium
@@ -668,12 +921,27 @@ export default function NutriMatch() {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <ShoppingCart className="w-5 h-5 text-[#FF9E4A]" />
-                    Lista de Compras
+                    Lista de Compras Inteligente
                   </CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <p className="text-gray-600">Gere automaticamente sua lista de compras com preços estimados</p>
-                  {!isPremium && (
+                <CardContent className="space-y-3">
+                  <p className="text-gray-600">Gere automaticamente sua lista com preços e dicas de economia</p>
+                  {isPremium ? (
+                    <Button 
+                      onClick={generateShoppingList}
+                      disabled={isGeneratingShopping || !weeklyRoutine}
+                      className="w-full bg-[#FF9E4A] hover:bg-[#FF9E4A]/90"
+                    >
+                      {isGeneratingShopping ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Gerando...
+                        </>
+                      ) : (
+                        'Gerar Lista de Compras'
+                      )}
+                    </Button>
+                  ) : (
                     <Badge className="mt-3 bg-amber-100 text-amber-800 border-amber-300">
                       <Lock className="w-3 h-3 mr-1" />
                       Premium
@@ -690,7 +958,7 @@ export default function NutriMatch() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-gray-600">Encontre alternativas mais baratas ou saudáveis para qualquer alimento</p>
+                  <p className="text-gray-600">Encontre alternativas mais baratas ou saudáveis com IA</p>
                   {!isPremium && (
                     <Badge className="mt-3 bg-amber-100 text-amber-800 border-amber-300">
                       <Lock className="w-3 h-3 mr-1" />
@@ -707,9 +975,24 @@ export default function NutriMatch() {
                     Lembretes Personalizados
                   </CardTitle>
                 </CardHeader>
-                <CardContent>
-                  <p className="text-gray-600">Receba notificações para refeições e hidratação no horário certo</p>
-                  {!isPremium && (
+                <CardContent className="space-y-3">
+                  <p className="text-gray-600">Receba lembretes inteligentes criados por IA</p>
+                  {isPremium ? (
+                    <Button 
+                      onClick={generateReminders}
+                      disabled={isGeneratingReminders || !mealPlan}
+                      className="w-full bg-[#FF9E4A] hover:bg-[#FF9E4A]/90"
+                    >
+                      {isGeneratingReminders ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Gerando...
+                        </>
+                      ) : (
+                        'Gerar Lembretes'
+                      )}
+                    </Button>
+                  ) : (
                     <Badge className="mt-3 bg-amber-100 text-amber-800 border-amber-300">
                       <Lock className="w-3 h-3 mr-1" />
                       Premium
@@ -718,6 +1001,92 @@ export default function NutriMatch() {
                 </CardContent>
               </Card>
             </div>
+
+            {/* Exibir Rotina Semanal */}
+            {weeklyRoutine && (
+              <Card className="border-2 border-[#8FD694]/30">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Calendar className="w-6 h-6 text-[#8FD694]" />
+                    Sua Rotina Semanal
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    {weeklyRoutine.weeklyPlan?.map((day: any, index: number) => (
+                      <div key={index} className="p-4 bg-gray-50 rounded-lg">
+                        <h3 className="font-bold text-lg mb-2">{day.day}</h3>
+                        <p className="text-sm text-gray-600 mb-2">
+                          {day.totalDayCalories} kcal • R$ {day.totalDayCost?.toFixed(2)}
+                        </p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {day.meals?.map((meal: any, mealIndex: number) => (
+                            <div key={mealIndex} className="text-sm">
+                              <span className="font-semibold">{meal.name}:</span> {meal.totalCalories} kcal
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Exibir Lista de Compras */}
+            {shoppingList && (
+              <Card className="border-2 border-[#FF9E4A]/30">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <ShoppingCart className="w-6 h-6 text-[#FF9E4A]" />
+                    Lista de Compras - R$ {shoppingList.totalCost?.toFixed(2)}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    {shoppingList.categories?.map((category: any, index: number) => (
+                      <div key={index}>
+                        <h3 className="font-bold mb-2">{category.name} - R$ {category.categoryTotal?.toFixed(2)}</h3>
+                        <div className="space-y-2">
+                          {category.items?.map((item: any, itemIndex: number) => (
+                            <div key={itemIndex} className="flex justify-between text-sm p-2 bg-gray-50 rounded">
+                              <span>{item.product} ({item.quantity})</span>
+                              <span className="font-semibold">R$ {item.totalPrice?.toFixed(2)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Exibir Lembretes */}
+            {reminders && (
+              <Card className="border-2 border-[#8FD694]/30">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Bell className="w-6 h-6 text-[#8FD694]" />
+                    Seus Lembretes Personalizados
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {reminders.reminders?.map((reminder: any, index: number) => (
+                      <div key={index} className="p-4 bg-gray-50 rounded-lg flex items-start gap-3">
+                        <span className="text-2xl">{reminder.icon}</span>
+                        <div className="flex-1">
+                          <h4 className="font-semibold">{reminder.title}</h4>
+                          <p className="text-sm text-gray-600">{reminder.message}</p>
+                          <p className="text-xs text-gray-500 mt-1">Horário: {reminder.time}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           <TabsContent value="plan" className="space-y-8">
@@ -888,6 +1257,13 @@ export default function NutriMatch() {
                             </div>
                           </div>
                         ))}
+                        {isSendingMessage && (
+                          <div className="flex justify-start">
+                            <div className="bg-white border-2 border-gray-200 px-5 py-3 rounded-2xl shadow-md">
+                              <Loader2 className="w-5 h-5 text-[#8FD694] animate-spin" />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -898,15 +1274,19 @@ export default function NutriMatch() {
                       onChange={(e) => setChatInput(e.target.value)}
                       placeholder="Digite sua pergunta sobre nutrição..."
                       onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-                      disabled={!canUseAIChat()}
+                      disabled={!canUseAIChat() || isSendingMessage}
                       className="text-base"
                     />
                     <Button 
                       onClick={sendMessage} 
                       className="bg-gradient-to-r from-[#8FD694] to-[#FF9E4A] hover:opacity-90 text-white font-semibold px-8"
-                      disabled={!canUseAIChat()}
+                      disabled={!canUseAIChat() || isSendingMessage}
                     >
-                      Enviar
+                      {isSendingMessage ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        'Enviar'
+                      )}
                     </Button>
                   </div>
                 </div>
